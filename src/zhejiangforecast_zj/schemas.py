@@ -33,6 +33,8 @@ class IngestRequest(BaseModel):
     feature_set: str | None = None
     station: StationPayload | None = None
     data_paths: DataPaths | None = None
+    etl_options: dict[str, Any] | None = None
+    train_options: dict[str, Any] | None = None
     run_etl: bool = True
 
 
@@ -79,4 +81,3 @@ class PointEdit(BaseModel):
 class DataEditRequest(BaseModel):
     task_id: str
     point_edits: list[PointEdit]
-
