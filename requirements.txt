@@ -1,0 +1,17 @@
+numpy>=1.23
+pandas>=1.5
+pydantic>=1.10
+fastapi>=0.100
+uvicorn[standard]>=0.22
+openpyxl>=3.1
+
+# Optional production/modeling dependencies:
+# scikit-learn>=1.2
+# joblib>=1.2
+# lightgbm>=4.0
+# xgboost>=1.7
+# xarray>=2023.1
+# netCDF4>=1.6
+# metpy>=1.5
+# apache-airflow>=2.7
+

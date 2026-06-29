@@ -1,0 +1,22 @@
+{
+  "station_id": "js_yancheng_h3",
+  "object_type": "station",
+  "station_type": "wind",
+  "train_start": "2025-02-19 00:00:00",
+  "train_end": "2025-12-31 23:45:00",
+  "eval_start": "2026-01-01 00:00:00",
+  "eval_end": "2026-01-31 23:45:00",
+  "model_candidates": ["EC_LGB_WIND_V1", "EC_LORA_WIND_V1.1", "PERSISTENCE_BASELINE"],
+  "feature_set": "ec_wind_tabular_v1",
+  "station": {
+    "station_name": "江苏盐城H3测试风电场",
+    "longitude": "120°36'08.736477\"",
+    "latitude": "034°18'51.964916\"",
+    "capacity_mw": 300.0
+  },
+  "data_paths": {
+    "power": "../测试场站数据/js_yanchengH3_wind/station_power/station_power_original_2502-2601.csv",
+    "nwp_root": "/mnt/d/data/netcdf/ecmwf/jiangsu"
+  }
+}
+
