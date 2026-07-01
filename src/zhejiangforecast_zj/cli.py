@@ -55,11 +55,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     settings = get_settings(args.home)
-    repo = Repository(settings.db_path)
+    repo = Repository(settings.database_url)
 
     if args.command == "init-db":
-        init_db(settings.db_path)
-        print(dumps({"db_path": str(settings.db_path), "status": "initialized"}))
+        init_db(settings.database_url)
+        print(dumps({"db_path": str(settings.db_path), "database_url": settings.database_url, "status": "initialized"}))
         return 0
     if args.command == "ingest":
         payload = read_json(args.payload, default={}) if args.payload else {}
@@ -118,4 +118,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

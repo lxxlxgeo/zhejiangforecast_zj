@@ -14,7 +14,7 @@ class LocalOrchestrator:
 
     def __init__(self, settings: Settings | None = None, repo: Repository | None = None):
         self.settings = settings or get_settings()
-        self.repo = repo or Repository(self.settings.db_path)
+        self.repo = repo or Repository(self.settings.database_url)
         self.executor = ThreadPoolExecutor(max_workers=self.settings.local_job_workers)
 
     def submit(self, task_id: str, job_type: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -38,4 +38,3 @@ class LocalOrchestrator:
 
         self.executor.submit(_run)
         return self.repo.get_job(job_id)
-

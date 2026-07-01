@@ -32,7 +32,7 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = get_settings(Path(args.home))
-    repo = Repository(settings.db_path)
+    repo = Repository(settings.database_url)
     payload = {
         "task_id": args.task_id,
         "station_id": "js_yancheng_h3",

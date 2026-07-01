@@ -8,4 +8,5 @@ runtime/
 runtime_*/
 *.db
 *.db-*
-
+*.csv* 
+/experiments/

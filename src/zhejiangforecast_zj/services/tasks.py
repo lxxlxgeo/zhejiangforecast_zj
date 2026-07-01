@@ -7,8 +7,8 @@ from typing import Any
 from zhejiangforecast_zj.core.config import Settings, get_settings
 from zhejiangforecast_zj.core.enums import ObjectType, StationType, TaskStatus
 from zhejiangforecast_zj.core.jsonx import read_json, write_json
-from zhejiangforecast_zj.adapters.cleaning import clean_wind_power
-from zhejiangforecast_zj.adapters.nwp import build_nwp_power_datasets, index_nwp_files
+from zhejiangforecast_zj.algorithm_engine.adapters.cleaning import clean_wind_power
+from zhejiangforecast_zj.algorithm_engine.adapters.nwp import build_nwp_power_datasets, index_nwp_files
 from zhejiangforecast_zj.core.model_catalog import normalize_candidates
 from zhejiangforecast_zj.core.paths import task_dir
 from zhejiangforecast_zj.db.repository import Repository
@@ -27,7 +27,7 @@ def create_or_ingest_task(
     run_etl: bool = True,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     station_type = str(payload.get("station_type") or StationType.WIND.value).lower()
     object_type = str(payload.get("object_type") or ObjectType.STATION.value).lower()
     task_id = str(payload.get("task_id") or f"task_{uuid.uuid4().hex[:12]}")
@@ -67,7 +67,7 @@ def create_or_ingest_task(
 
 def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repository | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id)
     request = task["request_json"]
     data_paths = request.get("data_paths") or {}

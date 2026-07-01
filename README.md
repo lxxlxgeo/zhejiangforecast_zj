@@ -105,7 +105,7 @@ PYTHONPATH=src python scripts/run_h3_smoke.py \
 
 ## API 示例
 
-业务后端完整对接说明见 `docs/backend_integration_guide.md`。可重复执行的接口闭环测试脚本见 `scripts/run_backend_api_flow.py`。
+业务后端完整对接说明见 `docs/backend_integration_guide.md`。算法后端/算法工程拆分与 SQLAlchemy 重构说明见 `docs/refactor_algorithm_engine.md`。可重复执行的接口闭环测试脚本见 `scripts/run_backend_api_flow.py`。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/online-modeling/ingest \

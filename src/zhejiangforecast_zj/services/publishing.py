@@ -19,7 +19,7 @@ def publish_model(
     repo: Repository | None = None,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id)
     if task["status"] not in {TaskStatus.EVALUATED.value, TaskStatus.PUBLISHED.value}:
         raise ValueError(f"Task {task_id} is not ready for publish: status={task['status']}")
@@ -48,4 +48,3 @@ def publish_model(
     repo.update_task(task_id, status=TaskStatus.PUBLISHED.value, published_model_id=model_id)
     repo.add_log(task_id, "publish", f"Published model: {model_id}")
     return {"task_id": task_id, "model_id": model_id, "version": artifact["version"], "model_card": model_card}
-

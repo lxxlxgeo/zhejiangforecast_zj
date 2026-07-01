@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from zhejiangforecast_zj.adapters.deep_learning import train_lora_swin3d, train_met_swin3d
+from zhejiangforecast_zj.algorithm_engine.adapters.deep_learning import train_lora_swin3d, train_met_swin3d
 from zhejiangforecast_zj.core.config import Settings, get_settings
 from zhejiangforecast_zj.core.enums import TaskStatus
 from zhejiangforecast_zj.core.jsonx import read_json, write_json
@@ -19,7 +19,7 @@ from zhejiangforecast_zj.services.simple_models import PersistenceModel, RidgePo
 
 def run_training(task_id: str, settings: Settings | None = None, repo: Repository | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id)
     if task["status"] not in {TaskStatus.CLEANED.value, TaskStatus.TRAINED.value, TaskStatus.EVALUATED.value}:
         raise ValueError(f"Task {task_id} is not ready for training: status={task['status']}")
@@ -277,7 +277,7 @@ def _train_tabular_candidate(
                 "model_type": model_type,
                 "feature_names": feature_names,
                 "capacity_mw": capacity_mw,
-                "reference": "baseline_mlops_by_gptpro/power_ml_baseline feature and time-split conventions",
+                "reference": "algorithm_engine/vendor/power_ml_baseline feature and time-split conventions",
             },
         )
         return {"model_type": model_type, "artifact_path": str(artifact_path), "y_pred": y_pred}

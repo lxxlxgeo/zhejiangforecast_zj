@@ -25,7 +25,7 @@ def run_inference(
     repo: Repository | None = None,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id) if task_id else None
     selected_model_id = model_id or (task or {}).get("published_model_id")
     if not selected_model_id:

@@ -26,14 +26,14 @@ from zhejiangforecast_zj.services.training import run_training
 
 
 settings = get_settings()
-repo = Repository(settings.db_path)
+repo = Repository(settings.database_url)
 orchestrator = LocalOrchestrator(settings=settings, repo=repo)
 app = FastAPI(title="Zhejiang Forecast Online Modeling", version="0.1.0")
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "db_path": str(settings.db_path)}
+    return {"status": "ok", "db_path": str(settings.db_path), "database_url": settings.database_url}
 
 
 @app.post("/api/v1/online-modeling/ingest")

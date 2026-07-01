@@ -15,7 +15,7 @@ from zhejiangforecast_zj.services.metrics import compute_metrics, daily_accuracy
 
 def run_evaluation(task_id: str, settings: Settings | None = None, repo: Repository | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id)
     if task["status"] not in {TaskStatus.TRAINED.value, TaskStatus.EVALUATED.value, TaskStatus.PUBLISHED.value}:
         raise ValueError(f"Task {task_id} is not ready for evaluation: status={task['status']}")
@@ -87,7 +87,7 @@ def run_evaluation(task_id: str, settings: Settings | None = None, repo: Reposit
 
 def get_evaluation_result(task_id: str, settings: Settings | None = None, repo: Repository | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
-    repo = repo or Repository(settings.db_path)
+    repo = repo or Repository(settings.database_url)
     task = repo.get_task(task_id)
     path = Path(task["work_dir"]) / "reports" / "eval_result.json"
     if path.exists():
@@ -108,4 +108,3 @@ def _build_curve_payload(task_id: str, repo: Repository) -> dict[str, Any]:
         "real": [{"time": time, "p_real": value} for time, value in real_by_time.items()],
         "predictions": pred_by_model,
     }
-

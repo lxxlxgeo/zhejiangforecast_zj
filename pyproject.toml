@@ -12,11 +12,14 @@ dependencies = [
   "numpy>=1.23",
   "pandas>=1.5",
   "pydantic>=1.10",
+  "joblib>=1.2",
+  "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
 api = ["fastapi>=0.100", "uvicorn[standard]>=0.22"]
-ml = ["scikit-learn>=1.2", "joblib>=1.2", "lightgbm>=4.0", "xgboost>=1.7"]
+ml = ["scikit-learn>=1.2", "lightgbm>=4.0", "xgboost>=1.7"]
+pg = ["psycopg[binary]>=3.1"]
 nwp = ["xarray>=2023.1", "netCDF4>=1.6", "metpy>=1.5"]
 excel = ["openpyxl>=3.1", "xlrd>=2.0"]
 dl = ["torch>=2.0"]
