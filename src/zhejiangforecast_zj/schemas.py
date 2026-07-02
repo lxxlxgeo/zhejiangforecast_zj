@@ -11,12 +11,31 @@ class DataPaths(BaseModel):
     station_info: str | None = None
     nwp_root: str | None = None
 
+    class Config:
+        extra = "allow"
+
 
 class StationPayload(BaseModel):
     station_name: str | None = None
     longitude: float | str | None = None
     latitude: float | str | None = None
     capacity_mw: float | None = None
+
+    class Config:
+        extra = "allow"
+
+
+class PowerDataPoint(BaseModel):
+    dataTime: str | None = None
+    actualPower: float | None = None
+    theoryPower: float | None = None
+    windSpeed: float | None = None
+    directIrradiance: float | None = None
+    irradiance: float | None = None
+    utcTime: str | None = None
+
+    class Config:
+        extra = "allow"
 
 
 class IngestRequest(BaseModel):
@@ -33,9 +52,13 @@ class IngestRequest(BaseModel):
     feature_set: str | None = None
     station: StationPayload | None = None
     data_paths: DataPaths | None = None
+    powerData: list[PowerDataPoint] | None = None
     etl_options: dict[str, Any] | None = None
     train_options: dict[str, Any] | None = None
     run_etl: bool = True
+
+    class Config:
+        extra = "allow"
 
 
 class TaskIdRequest(BaseModel):

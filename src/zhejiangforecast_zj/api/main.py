@@ -151,8 +151,8 @@ def model_list(station_type: str | None = None, object_type: str | None = None) 
 def evaluate(request: EvaluateRequest) -> dict:
     try:
         if request.sync:
-            return run_evaluation(request.task_id, settings=settings, repo=repo)
-        return orchestrator.submit(request.task_id, "evaluate", run_evaluation, request.task_id, settings, repo)
+            return _success_response(_evaluation_api_payload(run_evaluation(request.task_id, settings=settings, repo=repo)))
+        return _success_response(orchestrator.submit(request.task_id, "evaluate", run_evaluation, request.task_id, settings, repo))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -160,7 +160,7 @@ def evaluate(request: EvaluateRequest) -> dict:
 @app.get("/api/v1/online-modeling/evaluate/result")
 def evaluate_result(task_id: str = Query(...)) -> dict:
     try:
-        return get_evaluation_result(task_id, settings=settings, repo=repo)
+        return _success_response(_evaluation_api_payload(get_evaluation_result(task_id, settings=settings, repo=repo)))
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -191,3 +191,21 @@ def infer(request: InferRequest) -> dict:
 @app.get("/api/v1/online-modeling/infer/status")
 def infer_status(infer_id: str = Query(...)) -> dict:
     return {"infer_id": infer_id, "status": "SUCCESS", "note": "Local inference is synchronous in phase 1."}
+
+
+def _success_response(data: dict) -> dict:
+    return {"code": 200, "message": "请求成功！", "data": data}
+
+
+def _evaluation_api_payload(result: dict) -> dict:
+    selected = result.get("selected_model") or {}
+    daily = [_format_daily_accuracy_row(row) for row in (selected.get("daily_accuracy") or [])]
+    return {"task_id": result.get("task_id"), "daily_accuracy": daily}
+
+
+def _format_daily_accuracy_row(row: dict) -> dict:
+    out = dict(row)
+    date_value = str(out.get("date") or "")
+    if len(date_value) == 10:
+        out["date"] = f"{date_value} 00:00:00"
+    return out

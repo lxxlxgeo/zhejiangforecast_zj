@@ -127,7 +127,8 @@ def main() -> int:
     )
     infer_status = _get(client, "/api/v1/online-modeling/infer/status", {"infer_id": infer["infer_id"]})
 
-    selected_model = evaluate_result.get("selected_model") or evaluate.get("selected_model") or {}
+    evaluate_data = evaluate.get("data", evaluate)
+    evaluate_result_data = evaluate_result.get("data", evaluate_result)
     data_checks = data_status.get("data_checks") or []
     dataset_check = next((row for row in data_checks if row.get("data_type") == "dataset"), {})
     dataset_summary = dataset_check.get("summary_json") or {}
@@ -143,8 +144,8 @@ def main() -> int:
         "saved_point_edits": data_edit.get("saved"),
         "trained_models": len(train.get("models", [])),
         "train_status": train_status.get("status"),
-        "eval_model_count": len(evaluate_result.get("models", [])),
-        "selected_model_id": selected_model.get("model_id"),
+        "eval_daily_accuracy_count": len(evaluate_result_data.get("daily_accuracy") or evaluate_data.get("daily_accuracy") or []),
+        "selected_model_id": publish.get("model_id"),
         "published_model_id": publish.get("model_id"),
         "infer_points": len(infer.get("predictions", [])),
         "infer_status": infer_status.get("status"),

@@ -178,6 +178,74 @@ def read_power_timeseries(path: str | Path) -> tuple[pd.DataFrame, dict[str, Any
     return frame, summary
 
 
+def read_power_records(records: list[dict[str, Any]], source_name: str = "powerData") -> tuple[pd.DataFrame, dict[str, Any]]:
+    raw = pd.DataFrame(records or [])
+    if raw.empty:
+        raise ValueError(f"Inline power records are empty: {source_name}")
+    columns = list(raw.columns)
+    time_col = _find_column(columns, ["dataTime", "bjTime", "time_bj", "datetime", "time"])
+    utc_col = _find_column(columns, ["utcTime", "utc_time", "time_utc"])
+    power_col = _find_column(columns, ["actualPower", "actual_power", "power_mw", "power"])
+    if not time_col and not utc_col:
+        raise ValueError(f"No time field found in inline records: {source_name}")
+    if not power_col:
+        raise ValueError(f"No actual power field found in inline records: {source_name}")
+
+    frame = raw.copy()
+    if time_col:
+        frame["time_bj"] = pd.to_datetime(frame[time_col], errors="coerce")
+    else:
+        frame["time_bj"] = pd.to_datetime(frame[utc_col], errors="coerce") + pd.Timedelta(hours=8)
+    if utc_col:
+        frame["time_utc"] = pd.to_datetime(frame[utc_col], errors="coerce")
+    else:
+        frame["time_utc"] = frame["time_bj"] - pd.Timedelta(hours=8)
+    frame["power_mw"] = pd.to_numeric(frame[power_col], errors="coerce")
+
+    ignored = {time_col, utc_col, power_col, "time_bj", "time_utc", "power_mw", None}
+    aux_cols: list[str] = []
+    alias_candidates = {
+        "theoretical_power": ["theoryPower", "theoreticalPower", "theory_power", "theoretical_power"],
+        "wind_speed_mean": ["windSpeed", "wind_speed", "wind_speed_mean"],
+        "direct_irradiance": ["directIrradiance", "direct_irradiance", "irradiance", "radiation"],
+    }
+    for aux_name, candidates in alias_candidates.items():
+        col = _find_column(columns, candidates)
+        if col and col not in ignored:
+            numeric = pd.to_numeric(frame[col], errors="coerce")
+            if numeric.notna().any():
+                frame[aux_name] = numeric
+                aux_cols.append(aux_name)
+                ignored.add(col)
+
+    for col in columns:
+        if col in ignored:
+            continue
+        numeric = pd.to_numeric(frame[col], errors="coerce")
+        if numeric.notna().sum() >= max(3, len(frame) // 20):
+            aux_name = _safe_feature_name(col)
+            if aux_name not in frame.columns:
+                frame[aux_name] = numeric
+                aux_cols.append(aux_name)
+
+    frame = frame[["time_bj", "time_utc", "power_mw", *aux_cols]].dropna(subset=["time_bj"])
+    frame = frame.sort_values("time_bj").drop_duplicates("time_bj", keep="last")
+    summary = {
+        "source_path": source_name,
+        "rows_raw": int(len(raw)),
+        "rows_parsed": int(len(frame)),
+        "time_column": time_col,
+        "utc_time_column": utc_col,
+        "power_column": power_col,
+        "aux_columns": aux_cols,
+        "missing_rate": float(frame["power_mw"].isna().mean()) if len(frame) else 1.0,
+        "start_time": str(frame["time_bj"].min()) if len(frame) else None,
+        "end_time": str(frame["time_bj"].max()) if len(frame) else None,
+        "check_result": "PASS" if len(frame) and frame["power_mw"].notna().any() else "FAILED",
+    }
+    return frame, summary
+
+
 def _safe_feature_name(value: object) -> str:
     name = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff]+", "_", str(value).strip())
     return name.strip("_") or "feature"
@@ -317,4 +385,3 @@ def write_dataset_artifacts(
         "feature_schema": str(schema_path),
         "summary": str(summary_path),
     }
-

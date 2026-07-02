@@ -22,8 +22,6 @@ def _find_ws_column(frame: pd.DataFrame) -> str | None:
         "ws_mean",
         "wind_speed_mean",
         "farm_wind_speed",
-        "场站平均风速",
-        "平均风速",
         "ws_100",
         "ws_70",
         "ws_10",
@@ -34,7 +32,31 @@ def _find_ws_column(frame: pd.DataFrame) -> str | None:
             return lower[item.lower()]
     for col in frame.columns:
         text = str(col).lower()
-        if ("wind" in text and "speed" in text) or "风速" in text or text.startswith("ws_"):
+        if ("wind" in text and "speed" in text) or text.startswith("ws_") or "风速" in str(col):
+            return col
+    return None
+
+
+def _find_irradiance_column(frame: pd.DataFrame) -> str | None:
+    exact = [
+        "direct_irradiance",
+        "radiation_total",
+        "total_irradiance",
+        "global_irradiance",
+        "irradiance",
+        "ghi",
+        "dni",
+        "direct_radiation",
+        "solar_radiation",
+    ]
+    lower = {str(c).lower(): c for c in frame.columns}
+    for item in exact:
+        if item.lower() in lower:
+            return lower[item.lower()]
+    for col in frame.columns:
+        text = str(col).lower()
+        raw = str(col)
+        if "irradiance" in text or "radiation" in text or "辐射" in raw or "辐照" in raw:
             return col
     return None
 
@@ -115,6 +137,85 @@ def clean_wind_power(
             {
                 "used_external_pipeline": False,
                 "reason": "external_pipeline_failed",
+                "error": str(exc),
+                "rows_total": int(len(power_df)),
+                "clean_rows": int(len(base)),
+            },
+            None,
+            False,
+        )
+
+
+def clean_solar_power(
+    power_df: pd.DataFrame,
+    out_dir: str | Path,
+    capacity_mw: float | None,
+    enable_external: bool = True,
+) -> CleaningOutcome:
+    """Clean photovoltaic power using irradiance-aware rules."""
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    irr_col = _find_irradiance_column(power_df)
+    base = power_df.copy()
+    base = base.dropna(subset=["time_bj", "power_mw"]).sort_values("time_bj")
+    if irr_col is None or len(base) < 100 or not enable_external:
+        base["flag_clean_train_solar"] = True
+        base["clean_source"] = "basic_solar_physical_filter"
+        summary = {
+            "used_external_pipeline": False,
+            "reason": "missing_irradiance_column_or_small_sample" if irr_col is None or len(base) < 100 else "disabled",
+            "rows_total": int(len(power_df)),
+            "clean_rows": int(len(base)),
+            "removed_rows": int(len(power_df) - len(base)),
+        }
+        return CleaningOutcome(base, summary, None, False)
+
+    try:
+        enable_vendor_project("solar_clean")
+        from solar_clean.config import SolarCleanConfig
+        from solar_clean.pipeline import run_pipeline
+
+        std_path = out_dir / "solar_power_irradiance.csv"
+        std = pd.DataFrame(
+            {
+                "time_bj": base["time_bj"],
+                "power_mw": pd.to_numeric(base["power_mw"], errors="coerce"),
+                "direct_irradiance": pd.to_numeric(base[irr_col], errors="coerce"),
+            }
+        )
+        std.to_csv(std_path, index=False, encoding="utf-8-sig")
+        cfg = SolarCleanConfig(capacity_mw=float(capacity_mw or max(base["power_mw"].quantile(0.99), 1.0)))
+        result = run_pipeline(std_path, out_dir / "solar_clean", cfg)
+        cleaned = result.cleaned.copy()
+        cleaned = cleaned[cleaned["flag_clean_train_solar"].fillna(False)].copy()
+        cleaned["time_bj"] = pd.to_datetime(cleaned["time_bj"])
+        cleaned["time_utc"] = cleaned["time_bj"] - pd.Timedelta(hours=8)
+        cleaned["power_mw"] = pd.to_numeric(cleaned["power_mw"], errors="coerce")
+        cleaned["direct_irradiance"] = pd.to_numeric(cleaned["direct_irradiance"], errors="coerce")
+        keep_cols = [
+            "time_bj",
+            "time_utc",
+            "power_mw",
+            "direct_irradiance",
+            "is_day_by_irradiance",
+            "solar_clean_reason",
+        ]
+        summary = {**result.summary, "used_external_pipeline": True, "irradiance_column": str(irr_col)}
+        return CleaningOutcome(
+            cleaned[[c for c in keep_cols if c in cleaned.columns]].sort_values("time_bj"),
+            summary,
+            out_dir / "solar_clean",
+            True,
+        )
+    except Exception as exc:
+        base["flag_clean_train_solar"] = True
+        base["clean_source"] = "solar_pipeline_failed_basic_fallback"
+        return CleaningOutcome(
+            base,
+            {
+                "used_external_pipeline": False,
+                "reason": "solar_pipeline_failed",
                 "error": str(exc),
                 "rows_total": int(len(power_df)),
                 "clean_rows": int(len(base)),

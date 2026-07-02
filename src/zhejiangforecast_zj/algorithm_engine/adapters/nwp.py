@@ -12,12 +12,21 @@ import pandas as pd
 from zhejiangforecast_zj.algorithm_engine.adapters.vendor_paths import enable_vendor_project
 from zhejiangforecast_zj.algorithm_engine.persistence.joblib_store import dump_joblib
 from zhejiangforecast_zj.core.jsonx import write_json
-from zhejiangforecast_zj.core.time_semantics import issue_for_valid_day_bj, lead_hours
+from zhejiangforecast_zj.core.time_semantics import BJ_TZ, issue_for_valid_day_bj, lead_hours, require_aware_utc, valid_window_for_issue
 
 
 WIND_PRESSURE_LEVELS = [900, 850, 800, 700]
 WIND_BASE_VARS = ["u", "v", "u10", "v10", "u100", "v100", "t2m", "sp"]
 SOLAR_BASE_VARS = ["ssrd", "fdir", "cdir", "t2m", "tcc", "lcc", "mcc", "hcc", "sp"]
+NWP_NON_FEATURE_COLUMNS = {
+    "time_bj",
+    "time_utc",
+    "valid_time",
+    "power_mw",
+    "issue_time_utc",
+    "horizon_code",
+    "nwp_file",
+}
 
 
 @dataclass
@@ -26,6 +35,14 @@ class NwpDatasetResult:
     eval_dataset: pd.DataFrame
     feature_names: list[str]
     artifacts: dict[str, str]
+    summary: dict[str, Any]
+
+
+@dataclass
+class NwpInferenceFeatureResult:
+    frame: pd.DataFrame
+    feature_names: list[str]
+    tensor: np.ndarray
     summary: dict[str, Any]
 
 
@@ -42,6 +59,26 @@ def find_issue_file(nwp_root: str | Path, issue_time_utc: datetime) -> Path | No
 
 def issue_from_valid_bj(valid_bj: pd.Timestamp, horizon_code: str = "N1") -> datetime:
     return issue_for_valid_day_bj(valid_bj.date(), horizon_code=horizon_code, cycle_hour=12)
+
+
+def is_nwp_ml_feature(name: str) -> bool:
+    """Return True only for known-at-forecast-time NWP tabular features."""
+
+    return name == "lead_hours" or name.startswith("nwp_")
+
+
+def nwp_ml_feature_names(frame: pd.DataFrame) -> list[str]:
+    return [
+        col
+        for col in frame.columns
+        if col not in NWP_NON_FEATURE_COLUMNS and is_nwp_ml_feature(str(col)) and pd.api.types.is_numeric_dtype(frame[col])
+    ]
+
+
+def assert_nwp_only_features(feature_names: list[str]) -> None:
+    leaked = [name for name in feature_names if not is_nwp_ml_feature(str(name))]
+    if leaked:
+        raise ValueError(f"NWP feature schema contains non-NWP fields: {leaked}")
 
 
 def index_nwp_files(nwp_root: str | Path | None) -> dict[str, Any]:
@@ -183,24 +220,8 @@ def build_nwp_power_datasets(
     else:
         y_norm = y
 
-    feature_names = [
-        col
-        for col in frame.columns
-        if col
-        not in {
-            "time_bj",
-            "time_utc",
-            "power_mw",
-            "issue_time_utc",
-            "horizon_code",
-            "nwp_file",
-        }
-        and pd.api.types.is_numeric_dtype(frame[col])
-    ]
-    frame = _add_history_features(frame, capacity_mw=capacity_mw)
-    for col in ["history_power_lag_1", "history_power_lag_4", "history_power_roll4", "history_power_roll96"]:
-        if col not in feature_names:
-            feature_names.append(col)
+    feature_names = nwp_ml_feature_names(frame)
+    assert_nwp_only_features(feature_names)
     train_mask_aligned = _range_mask(pd.to_datetime(frame["time_bj"]), train_start, train_end)
     eval_mask_aligned = _range_mask(pd.to_datetime(frame["time_bj"]), eval_start, eval_end)
     if not eval_mask_aligned.any():
@@ -244,6 +265,7 @@ def build_nwp_power_datasets(
             "station_type": station_type,
             "grid_size": grid_size,
             "sequence_steps": sequence_steps,
+            "feature_contract": "x=nwp_only,y=power_mw",
         },
     )
     _write_ml_baseline_joblib(frame, feature_names, paths["ml_baseline_joblib"])
@@ -257,10 +279,107 @@ def build_nwp_power_datasets(
         "failed_rows": int(failed_rows),
         "channels": channels or [],
         "feature_count": len(feature_names),
+        "feature_contract": "x=nwp_only,y=power_mw",
+        "features": feature_names,
         "start_time": str(frame["time_bj"].min()),
         "end_time": str(frame["time_bj"].max()),
     }
     return NwpDatasetResult(train_df, eval_df, feature_names, paths, summary)
+
+
+def build_nwp_inference_features(
+    *,
+    nwp_root: str | Path,
+    station_type: str,
+    longitude: float,
+    latitude: float,
+    issue_time_utc: str | datetime,
+    feature_names: list[str],
+    horizon_code: str = "N1",
+    grid_size: int = 16,
+    sequence_steps: int = 9,
+    periods: int = 96,
+) -> NwpInferenceFeatureResult:
+    """Build forecast-time NWP-only ML features without reading labels.
+
+    The returned frame intentionally has no power_mw column. It is suitable for
+    online inference where the valid-period actual power is unknown.
+    """
+
+    assert_nwp_only_features(feature_names)
+    issue_utc = require_aware_utc(pd.Timestamp(issue_time_utc).to_pydatetime())
+    window = valid_window_for_issue(issue_utc, horizon_code=horizon_code)
+    nwp_file = find_issue_file(nwp_root, issue_utc)
+    if nwp_file is None:
+        raise FileNotFoundError(f"NWP issue file not found for {issue_utc:%Y%m%d%H} under {nwp_root}")
+
+    import xarray as xr
+
+    ds = xr.open_dataset(nwp_file)
+    try:
+        ds = _preselect_station(ds, longitude=longitude, latitude=latitude, grid_size=grid_size, station_type=station_type)
+        downscale_pipeline = _build_downscale_pipeline()
+        if downscale_pipeline is not None:
+            try:
+                ds = downscale_pipeline.transform(ds)
+            except Exception:
+                ds = _simple_downscale(ds)
+        else:
+            ds = _simple_downscale(ds)
+
+        valid_utcs = pd.date_range(
+            pd.Timestamp(window.start_utc).tz_convert(None),
+            periods=int(periods),
+            freq="15min",
+        )
+        samples: list[dict[str, Any]] = []
+        tensors: list[np.ndarray] = []
+        channels: list[str] | None = None
+        for valid_utc_ts in valid_utcs:
+            valid_utc_dt = valid_utc_ts.to_pydatetime().replace(tzinfo=timezone.utc)
+            valid_bj = pd.Timestamp(valid_utc_dt).tz_convert(BJ_TZ).tz_localize(None)
+            tensor, names = _extract_sample_tensor(ds, valid_utc_dt, station_type=station_type, sequence_steps=sequence_steps)
+            if channels is None:
+                channels = names
+            tensors.append(tensor.astype(np.float32))
+            samples.append(
+                {
+                    "valid_time": str(valid_bj),
+                    "time_bj": str(valid_bj),
+                    "time_utc": str(valid_utc_ts),
+                    "issue_time_utc": issue_utc.isoformat(),
+                    "horizon_code": horizon_code,
+                    "lead_hours": lead_hours(issue_utc, valid_utc_dt),
+                    "nwp_file": str(nwp_file),
+                    **_tensor_stats(tensor, names),
+                }
+            )
+    finally:
+        ds.close()
+
+    frame = pd.DataFrame(samples)
+    missing = [name for name in feature_names if name not in frame.columns]
+    if missing:
+        raise ValueError(f"NWP inference features missing model fields: {missing}")
+    for name in feature_names:
+        frame[name] = pd.to_numeric(frame[name], errors="coerce")
+    if frame[feature_names].isna().any().any():
+        bad = [name for name in feature_names if frame[name].isna().any()]
+        raise ValueError(f"NWP inference features contain NaN: {bad}")
+    return NwpInferenceFeatureResult(
+        frame=frame[["valid_time", "time_bj", "time_utc", "issue_time_utc", "horizon_code", "nwp_file", *feature_names]].copy(),
+        feature_names=list(feature_names),
+        tensor=np.stack(tensors).astype(np.float32),
+        summary={
+            "issue_time_utc": issue_utc.isoformat(),
+            "horizon_code": horizon_code,
+            "periods": int(len(frame)),
+            "channels": channels or [],
+            "feature_count": len(feature_names),
+            "feature_contract": "x=nwp_only,no_label_required",
+            "nwp_file": str(nwp_file),
+        },
+    )
 
 
 def _range_mask(series: pd.Series, start: str | None, end: str | None) -> pd.Series:
@@ -270,6 +389,17 @@ def _range_mask(series: pd.Series, start: str | None, end: str | None) -> pd.Ser
     if end:
         mask &= series <= pd.to_datetime(end)
     return mask
+
+
+def _build_downscale_pipeline():
+    try:
+        enable_vendor_project("nwp_downscaling")
+        from nwp_temporal_downscaling.config import DownscaleConfig
+        from nwp_temporal_downscaling.pipeline import TemporalDownscalePipeline
+
+        return TemporalDownscalePipeline(DownscaleConfig(target_freq="15min"))
+    except Exception:
+        return None
 
 
 def _preselect_station(ds, *, longitude: float, latitude: float, grid_size: int, station_type: str):
@@ -412,19 +542,6 @@ def _tensor_stats(tensor: np.ndarray, channels: list[str]) -> dict[str, float]:
         center = arr[:, arr.shape[1] // 2, arr.shape[2] // 2]
         out[f"nwp_{name}_center_t0"] = float(center[len(center) // 2])
     return out
-
-
-def _add_history_features(frame: pd.DataFrame, capacity_mw: float | None) -> pd.DataFrame:
-    frame = frame.sort_values("time_bj").reset_index(drop=True)
-    frame["history_power_lag_1"] = frame["power_mw"].shift(1)
-    frame["history_power_lag_4"] = frame["power_mw"].shift(4)
-    frame["history_power_roll4"] = frame["power_mw"].shift(1).rolling(4, min_periods=1).mean()
-    frame["history_power_roll96"] = frame["power_mw"].shift(1).rolling(96, min_periods=4).mean()
-    if capacity_mw:
-        frame["capacity_mw"] = float(capacity_mw)
-    for col in ["history_power_lag_1", "history_power_lag_4", "history_power_roll4", "history_power_roll96"]:
-        frame[col] = frame[col].fillna(frame["power_mw"].median())
-    return frame
 
 
 def _write_ml_baseline_joblib(frame: pd.DataFrame, feature_names: list[str], path: str | Path) -> None:

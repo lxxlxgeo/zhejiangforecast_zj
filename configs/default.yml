@@ -1,0 +1,17 @@
+runtime:
+  # Relative paths are resolved from this configs directory unless an env var overrides them.
+  project_root: ../runtime
+  local_job_workers: 2
+
+database:
+  # Relative database paths are resolved under runtime.project_root.
+  path: zj_forecast.db
+  url:
+
+nwp:
+  # Request data_paths.nwp_root has the highest business priority for a task.
+  # If it is omitted, tasks use the station-type root below.
+  default_root:
+  roots:
+    wind: /mnt/d/data/netcdf/ecmwf/jiangsu
+    solar: /mnt/d/data/netcdf/ecmwf/neimeng

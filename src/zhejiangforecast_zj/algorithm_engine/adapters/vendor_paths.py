@@ -46,6 +46,7 @@ def enable_vendor_project(name: str) -> Path:
         "nwp_downscaling": paths.nwp_downscaling_src,
         "swin3d": paths.swin3d_src,
         "lora_swin3d": paths.lora_swin3d_src,
+        "solar_clean": paths.root / "vendor",
     }
     if name not in mapping:
         raise KeyError(name)

@@ -58,9 +58,14 @@ def train_met_swin3d(
     capacity = meta.get("capacity_mw") or 1.0
     train_ds = NpyNwpPowerDataset(train_x, train_y, standardizer=standardizer, y_scale=None, mmap_mode="r")
     eval_ds = NpyNwpPowerDataset(eval_x, eval_y, standardizer=standardizer, y_scale=None, mmap_mode="r")
+    in_chans = int(meta["shape"][1])
+    schema = "derived14" if in_chans >= 14 else "flat"
     cfg = MetSwin3DPowerConfig(
-        in_chans=int(meta["shape"][1]),
+        in_chans=in_chans,
         out_dim=1,
+        schema=schema,
+        surface_indices=tuple(range(min(6, in_chans))),
+        residual_proxy_indices=tuple(range(in_chans)),
         embed_dim=24,
         depths=(1, 1, 1),
         num_heads=(3, 3, 6),

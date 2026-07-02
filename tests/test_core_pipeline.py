@@ -44,7 +44,7 @@ class CorePipelineTest(unittest.TestCase):
                     "train_end": "2026-01-02 23:45:00",
                     "eval_start": "2026-01-03 00:00:00",
                     "eval_end": "2026-01-03 23:45:00",
-                    "model_candidates": ["EC_LGB_WIND_V1", "PERSISTENCE_BASELINE"],
+                    "model_candidates": ["PERSISTENCE_BASELINE"],
                     "station": {"capacity_mw": 100.0},
                     "data_paths": {"power": str(data_path)},
                 },
@@ -61,7 +61,41 @@ class CorePipelineTest(unittest.TestCase):
             infer = run_inference(task_id="task_smoke", issue_time="2026-01-04 12:00:00", settings=settings, repo=repo)
             self.assertEqual(len(infer["predictions"]), 96)
 
+    def test_ec_candidate_without_nwp_fails_instead_of_history_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "power.csv"
+            times = pd.date_range("2026-01-01", periods=160, freq="15min")
+            pd.DataFrame(
+                {
+                    "bj_time": times,
+                    "actual_power": 50 + 10 * np.sin(np.arange(len(times)) / 8.0),
+                    "utc_time": times - pd.Timedelta(hours=8),
+                }
+            ).to_csv(data_path, index=False)
+
+            settings = Settings(project_root=root / "runtime", db_path=root / "runtime" / "test.db")
+            settings.ensure_dirs()
+            repo = Repository(settings.db_path)
+            task = create_or_ingest_task(
+                {
+                    "task_id": "task_ec_requires_nwp",
+                    "station_id": "smoke",
+                    "station_type": "wind",
+                    "train_start": "2026-01-01 00:00:00",
+                    "train_end": "2026-01-02 00:00:00",
+                    "eval_start": "2026-01-02 00:15:00",
+                    "eval_end": "2026-01-02 23:45:00",
+                    "model_candidates": ["EC_LGB_WIND_V1"],
+                    "station": {"capacity_mw": 100.0},
+                    "data_paths": {"power": str(data_path)},
+                },
+                settings=settings,
+                repo=repo,
+            )
+            self.assertEqual(task["status"], "FAILED")
+            self.assertIn("refusing to fall back to power-history features", task["error_message"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

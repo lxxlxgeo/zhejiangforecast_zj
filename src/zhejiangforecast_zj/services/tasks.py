@@ -4,16 +4,17 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from zhejiangforecast_zj.core.config import Settings, get_settings
+from zhejiangforecast_zj.core.config import Settings, get_settings, normalize_external_path
 from zhejiangforecast_zj.core.enums import ObjectType, StationType, TaskStatus
 from zhejiangforecast_zj.core.jsonx import read_json, write_json
-from zhejiangforecast_zj.algorithm_engine.adapters.cleaning import clean_wind_power
+from zhejiangforecast_zj.algorithm_engine.adapters.cleaning import clean_solar_power, clean_wind_power
 from zhejiangforecast_zj.algorithm_engine.adapters.nwp import build_nwp_power_datasets, index_nwp_files
 from zhejiangforecast_zj.core.model_catalog import normalize_candidates
 from zhejiangforecast_zj.core.paths import task_dir
 from zhejiangforecast_zj.db.repository import Repository
 from zhejiangforecast_zj.services.etl import (
     build_tabular_dataset,
+    read_power_records,
     read_power_timeseries,
     read_station_metadata,
     write_dataset_artifacts,
@@ -79,16 +80,25 @@ def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repo
             station_id=task.get("station_id"),
             defaults=station_defaults,
         )
-        power_path = data_paths.get("power") or data_paths.get("power_path")
-        nwp_root = data_paths.get("nwp_root") or (str(settings.nwp_root) if settings.nwp_root else None)
+        power_path = normalize_external_path(data_paths.get("power") or data_paths.get("power_path"), base=Path.cwd())
+        inline_power_data = request.get("powerData") or request.get("power_data")
+        request_nwp_root = normalize_external_path(data_paths.get("nwp_root"), base=Path.cwd())
+        default_nwp_root = settings.nwp_root_for(task["station_type"])
+        nwp_root = request_nwp_root or (str(default_nwp_root) if default_nwp_root else None)
         nwp_summary = index_nwp_files(nwp_root)
         repo.add_data_check(task_id, "nwp", {**nwp_summary, "check_result": "PASS" if nwp_summary["file_count"] else "WARN"})
 
-        if not power_path:
+        if not power_path and not inline_power_data:
             repo.add_log(task_id, "data", "No power_path provided; task remains CREATED", level="WARN")
             return repo.update_task(task_id, status=TaskStatus.CREATED.value)
 
-        power_df, power_summary = read_power_timeseries(power_path)
+        if power_path:
+            power_df, power_summary = read_power_timeseries(power_path)
+        else:
+            power_records = [dict(row) for row in inline_power_data]
+            write_json(work_dir / "data" / "source_powerData.json", power_records)
+            power_df, power_summary = read_power_records(power_records)
+            power_df.to_csv(work_dir / "data" / "source_powerData.csv", index=False, encoding="utf-8-sig")
         repo.add_data_check(task_id, "power", power_summary)
         repo.update_task(task_id, status=TaskStatus.DATA_READY.value)
 
@@ -105,6 +115,22 @@ def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repo
             repo.add_data_check(
                 task_id,
                 "wind_cleaning",
+                {
+                    **clean.summary,
+                    "check_result": "PASS" if clean.summary.get("clean_rows", 0) else "WARN",
+                },
+            )
+        elif task["station_type"] == "solar":
+            clean = clean_solar_power(
+                power_df,
+                out_dir=work_dir / "data" / "cleaning",
+                capacity_mw=capacity_mw,
+                enable_external=bool(request.get("etl_options", {}).get("enable_solar_cleaning", True)),
+            )
+            power_df = clean.clean_power
+            repo.add_data_check(
+                task_id,
+                "solar_cleaning",
                 {
                     **clean.summary,
                     "check_result": "PASS" if clean.summary.get("clean_rows", 0) else "WARN",
@@ -161,9 +187,22 @@ def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repo
                 **{f"nwp_{k}": v for k, v in nwp_dataset.artifacts.items()},
             }
             power_df.to_csv(paths["clean_series"], index=False, encoding="utf-8-sig")
-            write_json(paths["feature_schema"], {"feature_names": feature_names, "target": "power_mw"})
+            write_json(
+                paths["feature_schema"],
+                {
+                    "feature_names": feature_names,
+                    "target": "power_mw",
+                    "feature_contract": "x=nwp_only,y=power_mw",
+                },
+            )
             write_json(paths["summary"], dataset_summary)
         else:
+            if _has_nwp_required_candidates(task["model_candidates"]):
+                reason = nwp_error or "nwp_root or station longitude/latitude is missing"
+                raise ValueError(
+                    "NWP aligned dataset is required for EC wind/solar model candidates; "
+                    f"refusing to fall back to power-history features. reason={reason}"
+                )
             train_df, eval_df, feature_names, dataset_summary = build_tabular_dataset(
                 power_df=power_df,
                 train_start=task.get("train_start"),
@@ -207,3 +246,11 @@ def _request_capacity(request: dict[str, Any]) -> float | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _has_nwp_required_candidates(candidates: list[str]) -> bool:
+    for candidate in candidates:
+        name = str(candidate).upper()
+        if name.startswith("EC_") and any(token in name for token in ("XGB", "LGB", "SWIN3D", "LORA")):
+            return True
+    return False
