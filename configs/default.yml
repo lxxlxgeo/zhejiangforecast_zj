@@ -1,5 +1,6 @@
 runtime:
-  # Relative paths are resolved from this configs directory unless an env var overrides them.
+  # Relative paths are resolved from this configs directory.
+  # Effective priority: explicit --home/project_root argument > this yml > env vars > ./runtime.
   project_root: ../runtime
   local_job_workers: 2
 

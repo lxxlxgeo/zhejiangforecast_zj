@@ -118,6 +118,7 @@ class Settings:
 
     project_root: Path
     db_path: Path
+    config_path: Path | None = None
     db_url: str | None = None
     nwp_root: Path | None = None
     nwp_roots: dict[str, Path] | None = None
@@ -165,8 +166,15 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
     config_base = config_path.parent if config_path else Path.cwd()
 
     configured_root = _get_nested(config, "runtime", "project_root") or config.get("runtime_root") or _get_nested(config, "output", "root")
-    root_default = _normalize_path(configured_root, base=config_base) if configured_root else (Path.cwd() / "runtime").resolve()
-    root = _normalize_path(project_root, base=Path.cwd()) if project_root else _path_from_env("ZJ_FORECAST_HOME", root_default)
+    env_root = os.getenv("ZJ_FORECAST_HOME")
+    if project_root:
+        root = _normalize_path(project_root, base=Path.cwd())
+    elif configured_root:
+        root = _normalize_path(configured_root, base=config_base)
+    elif env_root:
+        root = _normalize_path(env_root, base=Path.cwd())
+    else:
+        root = (Path.cwd() / "runtime").resolve()
 
     db_env = os.getenv("ZJ_FORECAST_DB")
     db_url = os.getenv("ZJ_FORECAST_DB_URL")
@@ -196,6 +204,7 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
     settings = Settings(
         project_root=root,
         db_path=db_path,
+        config_path=config_path,
         db_url=db_url,
         nwp_root=nwp_root,
         nwp_roots=nwp_roots,

@@ -33,7 +33,15 @@ app = FastAPI(title="Zhejiang Forecast Online Modeling", version="0.1.0")
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "db_path": str(settings.db_path), "database_url": settings.database_url}
+    return {
+        "status": "ok",
+        "config_path": str(settings.config_path) if settings.config_path else None,
+        "project_root": str(settings.project_root),
+        "db_path": str(settings.db_path),
+        "database_url": settings.database_url,
+        "nwp_root": str(settings.nwp_root) if settings.nwp_root else None,
+        "nwp_roots": {key: str(value) for key, value in (settings.nwp_roots or {}).items()},
+    }
 
 
 @app.post("/api/v1/online-modeling/ingest")
