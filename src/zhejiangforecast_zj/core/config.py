@@ -122,6 +122,8 @@ class Settings:
     db_url: str | None = None
     nwp_root: Path | None = None
     nwp_roots: dict[str, Path] | None = None
+    nwp_job_workers: int = 4
+    nwp_parallel_backend: str = "loky"
     default_timezone: str = "Asia/Shanghai"
     local_job_workers: int = 2
 
@@ -201,6 +203,11 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
                 nwp_roots[str(key).lower()] = _normalize_path(value, base=config_base)
 
     workers = int(os.getenv("ZJ_FORECAST_JOB_WORKERS", str(_get_nested(config, "runtime", "local_job_workers") or 2)))
+    nwp_workers = int(os.getenv("ZJ_FORECAST_NWP_WORKERS", str(_get_nested(config, "nwp", "workers") or 4)))
+    nwp_parallel_backend = os.getenv(
+        "ZJ_FORECAST_NWP_PARALLEL_BACKEND",
+        str(_get_nested(config, "nwp", "parallel_backend") or "loky"),
+    )
     settings = Settings(
         project_root=root,
         db_path=db_path,
@@ -208,6 +215,8 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
         db_url=db_url,
         nwp_root=nwp_root,
         nwp_roots=nwp_roots,
+        nwp_job_workers=max(1, nwp_workers),
+        nwp_parallel_backend=nwp_parallel_backend,
         local_job_workers=workers,
     )
     settings.ensure_dirs()

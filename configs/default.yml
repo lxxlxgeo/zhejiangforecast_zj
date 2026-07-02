@@ -10,6 +10,10 @@ database:
   url:
 
 nwp:
+  # NWP NetCDF extraction is parallelized by issue file.
+  # loky is process-based and safer for NetCDF/HDF5 I/O than Python threads.
+  workers: 4
+  parallel_backend: loky
   # Request data_paths.nwp_root has the highest business priority for a task.
   # If it is omitted, tasks use the station-type root below.
   default_root:

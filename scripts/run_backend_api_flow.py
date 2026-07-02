@@ -22,6 +22,10 @@ def _get(client, url: str, params: dict[str, Any] | None = None) -> dict[str, An
     return response.json()
 
 
+def _data(response: dict[str, Any]) -> dict[str, Any]:
+    return response.get("data", response)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the docx backend API acceptance flow.")
     parser.add_argument("--home", default="runtime_backend_api_flow")
@@ -125,30 +129,41 @@ def main() -> int:
         "/api/v1/online-modeling/infer",
         {"task_id": task_id, "issue_time": "2025-11-03 12:00:00"},
     )
-    infer_status = _get(client, "/api/v1/online-modeling/infer/status", {"infer_id": infer["infer_id"]})
+    infer_status = _get(client, "/api/v1/online-modeling/infer/status", {"infer_id": _data(infer)["infer_id"]})
 
     evaluate_data = evaluate.get("data", evaluate)
     evaluate_result_data = evaluate_result.get("data", evaluate_result)
-    data_checks = data_status.get("data_checks") or []
+    health_data = _data(health)
+    model_list_data = _data(model_list)
+    ingest_data = _data(ingest)
+    data_status_data = _data(data_status)
+    data_preview_data = _data(data_preview)
+    data_edit_data = _data(data_edit)
+    train_data = _data(train)
+    train_status_data = _data(train_status)
+    publish_data = _data(publish)
+    infer_data = _data(infer)
+    infer_status_data = _data(infer_status)
+    data_checks = data_status_data.get("data_checks") or []
     dataset_check = next((row for row in data_checks if row.get("data_type") == "dataset"), {})
     dataset_summary = dataset_check.get("summary_json") or {}
     summary = {
         "task_id": task_id,
-        "health": health,
-        "model_count": len(model_list.get("models", [])),
-        "ingest_status": ingest.get("status"),
-        "data_status": data_status.get("status"),
+        "health": health_data,
+        "model_count": len(model_list_data.get("models", [])),
+        "ingest_status": ingest_data.get("status"),
+        "data_status": data_status_data.get("status"),
         "dataset_mode": dataset_summary.get("dataset_mode"),
         "aligned_samples": dataset_summary.get("aligned_samples"),
-        "preview_rows": len(data_preview.get("rows", [])),
-        "saved_point_edits": data_edit.get("saved"),
-        "trained_models": len(train.get("models", [])),
-        "train_status": train_status.get("status"),
+        "preview_rows": len(data_preview_data.get("rows", [])),
+        "saved_point_edits": data_edit_data.get("saved"),
+        "trained_models": len(train_data.get("models", [])),
+        "train_status": train_status_data.get("status"),
         "eval_daily_accuracy_count": len(evaluate_result_data.get("daily_accuracy") or evaluate_data.get("daily_accuracy") or []),
-        "selected_model_id": publish.get("model_id"),
-        "published_model_id": publish.get("model_id"),
-        "infer_points": len(infer.get("predictions", [])),
-        "infer_status": infer_status.get("status"),
+        "selected_model_id": publish_data.get("model_id"),
+        "published_model_id": publish_data.get("model_id"),
+        "infer_points": len(infer_data.get("predictions", [])),
+        "infer_status": infer_status_data.get("status"),
     }
     report_path = home / "backend_api_flow_summary.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)

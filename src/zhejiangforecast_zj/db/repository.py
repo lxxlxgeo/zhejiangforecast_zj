@@ -141,6 +141,15 @@ class Repository:
                 )
             )
 
+    def list_logs(self, task_id: str, stage: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        stmt = select(OnlineModelLog).where(OnlineModelLog.task_id == task_id)
+        if stage:
+            stmt = stmt.where(OnlineModelLog.stage == stage)
+        stmt = stmt.order_by(OnlineModelLog.id.desc()).limit(max(0, int(limit)))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
     def create_job(self, job_id: str, task_id: str, job_type: str, status: str = "CREATED") -> dict[str, Any]:
         now = utcnow_iso()
         with self.session_scope() as session:

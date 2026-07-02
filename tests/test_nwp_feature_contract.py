@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
 import pandas as pd
 
-from zhejiangforecast_zj.algorithm_engine.adapters.nwp import assert_nwp_only_features, nwp_ml_feature_names
+from zhejiangforecast_zj.algorithm_engine.adapters.nwp import _align_tensor_channels, assert_nwp_only_features, nwp_ml_feature_names
 from zhejiangforecast_zj.services.inference import _is_nwp_feature_set
 
 
@@ -35,6 +36,21 @@ class NwpFeatureContractTest(unittest.TestCase):
         self.assertFalse(_is_nwp_feature_set(["lead_hours", "history_power_lag_1"]))
         with self.assertRaises(ValueError):
             assert_nwp_only_features(["nwp_ssrd_mean", "history_power_lag_1"])
+
+    def test_align_tensor_channels_selects_first_sample_schema(self) -> None:
+        tensor = np.arange(4 * 2 * 3 * 3).reshape(4, 2, 3, 3)
+
+        aligned, names = _align_tensor_channels(tensor, ["ssrd", "fdir", "t2m", "sp"], ["ssrd", "t2m"])
+
+        self.assertEqual(names, ["ssrd", "t2m"])
+        np.testing.assert_array_equal(aligned[0], tensor[0])
+        np.testing.assert_array_equal(aligned[1], tensor[2])
+
+    def test_align_tensor_channels_rejects_missing_required_channel(self) -> None:
+        tensor = np.zeros((2, 2, 3, 3))
+
+        with self.assertRaisesRegex(ValueError, "missing channels"):
+            _align_tensor_channels(tensor, ["ssrd", "t2m"], ["ssrd", "sp"])
 
 
 if __name__ == "__main__":

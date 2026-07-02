@@ -158,6 +158,8 @@ def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repo
                     grid_size=int(etl_options.get("grid_size", 16)),
                     sequence_steps=int(etl_options.get("sequence_steps", 9)),
                     max_samples=etl_options.get("max_nwp_samples"),
+                    nwp_workers=int(etl_options.get("nwp_workers") or settings.nwp_job_workers),
+                    nwp_parallel_backend=str(etl_options.get("nwp_parallel_backend") or settings.nwp_parallel_backend),
                 )
                 repo.add_data_check(task_id, "nwp_aligned_dataset", nwp_dataset.summary)
             except Exception as exc:

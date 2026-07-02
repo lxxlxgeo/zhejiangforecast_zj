@@ -81,6 +81,22 @@ def assert_nwp_only_features(feature_names: list[str]) -> None:
         raise ValueError(f"NWP feature schema contains non-NWP fields: {leaked}")
 
 
+def _align_tensor_channels(tensor: np.ndarray, names: list[str], required_names: list[str]) -> tuple[np.ndarray, list[str]]:
+    by_name = {name: idx for idx, name in enumerate(names)}
+    missing = [name for name in required_names if name not in by_name]
+    if missing:
+        raise ValueError(f"NWP tensor missing channels required by first sample: {missing}; available={names}")
+    indices = [by_name[name] for name in required_names]
+    return tensor[indices], list(required_names)
+
+
+def _normalize_joblib_backend(value: str | None) -> str:
+    text = str(value or "loky").strip().lower()
+    if text in {"thread", "threads", "threading"}:
+        return "threading"
+    return "loky"
+
+
 def index_nwp_files(nwp_root: str | Path | None) -> dict[str, Any]:
     if not nwp_root:
         return {"nwp_root": None, "file_count": 0, "issues": ["nwp_root_not_configured"]}
@@ -103,6 +119,74 @@ def index_nwp_files(nwp_root: str | Path | None) -> dict[str, Any]:
     }
 
 
+def _primary_horizon_code(horizon_codes: Iterable[str]) -> str:
+    for code in horizon_codes:
+        text = str(code or "").strip().upper()
+        if text:
+            return text
+    return "N1"
+
+
+def _extract_nwp_group(
+    *,
+    nwp_file: str,
+    row_specs: list[dict[str, Any]],
+    station_type: str,
+    longitude: float,
+    latitude: float,
+    grid_size: int,
+    sequence_steps: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"records": [], "failed_rows": 0, "failure_samples": []}
+    if not row_specs:
+        return result
+
+    import xarray as xr
+
+    ds = None
+    try:
+        ds = xr.open_dataset(nwp_file)
+        ds = _preselect_station(ds, longitude=longitude, latitude=latitude, grid_size=grid_size, station_type=station_type)
+        valid_utcs = [require_aware_utc(pd.Timestamp(spec["valid_utc"]).to_pydatetime()) for spec in row_specs]
+        ds = _preselect_valid_time_window(ds, valid_utcs, sequence_steps=sequence_steps)
+        downscale_pipeline = _build_downscale_pipeline()
+        if downscale_pipeline is not None:
+            try:
+                ds = downscale_pipeline.transform(ds)
+            except Exception:
+                ds = _simple_downscale(ds)
+        else:
+            ds = _simple_downscale(ds)
+
+        for spec in row_specs:
+            try:
+                valid_utc = require_aware_utc(pd.Timestamp(spec["valid_utc"]).to_pydatetime())
+                issue_utc = require_aware_utc(pd.Timestamp(spec["issue_time_utc"]).to_pydatetime())
+                tensor, names = _extract_sample_tensor(ds, valid_utc, station_type=station_type, sequence_steps=sequence_steps)
+                result["records"].append(
+                    {
+                        **spec,
+                        "lead_hours": lead_hours(issue_utc, valid_utc),
+                        "tensor": tensor.astype(np.float32),
+                        "channels": names,
+                    }
+                )
+            except Exception as exc:
+                result["failed_rows"] += 1
+                if len(result["failure_samples"]) < 10:
+                    result["failure_samples"].append(f"{spec.get('time_bj')}: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        result["failed_rows"] += len(row_specs)
+        result["failure_samples"].append(f"{nwp_file}: {type(exc).__name__}: {exc}")
+    finally:
+        if ds is not None:
+            try:
+                ds.close()
+            except Exception:
+                pass
+    return result
+
+
 def build_nwp_power_datasets(
     *,
     power_df: pd.DataFrame,
@@ -120,6 +204,8 @@ def build_nwp_power_datasets(
     grid_size: int = 16,
     sequence_steps: int = 9,
     max_samples: int | None = None,
+    nwp_workers: int = 1,
+    nwp_parallel_backend: str = "loky",
 ) -> NwpDatasetResult:
     """Build aligned EC HRES NWP + power datasets for both ML and DL.
 
@@ -143,73 +229,145 @@ def build_nwp_power_datasets(
     if selected.empty:
         raise ValueError("No power rows selected for NWP alignment")
 
-    import xarray as xr
-
     samples: list[dict[str, Any]] = []
     tensors: list[np.ndarray] = []
     missing_files: set[str] = set()
     failed_rows = 0
-    cache: dict[Path, Any] = {}
     channels: list[str] | None = None
+    expected_tensor_shape: tuple[int, ...] | None = None
+    channel_mismatch_count = 0
+    shape_mismatch_count = 0
+    failure_samples: list[str] = []
+    parallel_fallback_reason: str | None = None
+    horizon_code = _primary_horizon_code(horizon_codes)
+    group_specs: dict[str, list[dict[str, Any]]] = {}
 
-    try:
-        enable_vendor_project("nwp_downscaling")
-        from nwp_temporal_downscaling.config import DownscaleConfig
-        from nwp_temporal_downscaling.pipeline import TemporalDownscalePipeline
-
-        downscale_pipeline = TemporalDownscalePipeline(DownscaleConfig(target_freq="15min"))
-    except Exception:
-        downscale_pipeline = None
-
-    for row in selected.itertuples(index=False):
+    for row_order, row in enumerate(selected.itertuples(index=False)):
         valid_bj = pd.Timestamp(row.time_bj)
         valid_utc = pd.Timestamp(row.time_utc).to_pydatetime().replace(tzinfo=timezone.utc)
-        horizon_code = "N1"
         issue_utc = issue_from_valid_bj(valid_bj, horizon_code)
         nwp_file = find_issue_file(nwp_root, issue_utc)
         if nwp_file is None:
             missing_files.add(issue_utc.strftime("%Y%m%d%H"))
             continue
+        group_specs.setdefault(str(nwp_file), []).append(
+            {
+                "row_order": row_order,
+                "time_bj": str(valid_bj),
+                "time_utc": str(pd.Timestamp(row.time_utc)),
+                "valid_utc": valid_utc.isoformat(),
+                "power_mw": float(row.power_mw),
+                "issue_time_utc": issue_utc.isoformat(),
+                "horizon_code": horizon_code,
+                "nwp_file": str(nwp_file),
+            }
+        )
+
+    group_items = sorted(group_specs.items(), key=lambda item: min(spec["row_order"] for spec in item[1]))
+    workers = max(1, int(nwp_workers or 1))
+    backend = _normalize_joblib_backend(nwp_parallel_backend)
+    if workers > 1 and len(group_items) > 1:
         try:
-            if nwp_file not in cache:
-                ds = xr.open_dataset(nwp_file)
-                ds = _preselect_station(ds, longitude=longitude, latitude=latitude, grid_size=grid_size, station_type=station_type)
-                if downscale_pipeline is not None:
-                    try:
-                        ds = downscale_pipeline.transform(ds)
-                    except Exception:
-                        ds = _simple_downscale(ds)
-                else:
-                    ds = _simple_downscale(ds)
-                cache[nwp_file] = ds
-            ds = cache[nwp_file]
-            tensor, names = _extract_sample_tensor(ds, valid_utc, station_type=station_type, sequence_steps=sequence_steps)
+            from joblib import Parallel, delayed
+
+            group_results = Parallel(n_jobs=min(workers, len(group_items)), backend=backend)(
+                delayed(_extract_nwp_group)(
+                    nwp_file=path,
+                    row_specs=specs,
+                    station_type=station_type,
+                    longitude=longitude,
+                    latitude=latitude,
+                    grid_size=grid_size,
+                    sequence_steps=sequence_steps,
+                )
+                for path, specs in group_items
+            )
+        except Exception as exc:
+            parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
+            group_results = [
+                _extract_nwp_group(
+                    nwp_file=path,
+                    row_specs=specs,
+                    station_type=station_type,
+                    longitude=longitude,
+                    latitude=latitude,
+                    grid_size=grid_size,
+                    sequence_steps=sequence_steps,
+                )
+                for path, specs in group_items
+            ]
+    else:
+        group_results = [
+            _extract_nwp_group(
+                nwp_file=path,
+                row_specs=specs,
+                station_type=station_type,
+                longitude=longitude,
+                latitude=latitude,
+                grid_size=grid_size,
+                sequence_steps=sequence_steps,
+            )
+            for path, specs in group_items
+        ]
+
+    tensor_records: list[dict[str, Any]] = []
+    for result in group_results:
+        failed_rows += int(result["failed_rows"])
+        remaining_failure_slots = max(0, 50 - len(failure_samples))
+        if remaining_failure_slots:
+            failure_samples.extend(result["failure_samples"][:remaining_failure_slots])
+        tensor_records.extend(result["records"])
+
+    tensor_records = sorted(tensor_records, key=lambda item: int(item["row_order"]))
+    for record in tensor_records:
+        valid_bj = record["time_bj"]
+        try:
+            tensor = record["tensor"]
+            names = record["channels"]
             if channels is None:
-                channels = names
+                channels = list(names)
+            elif names != channels:
+                channel_mismatch_count += 1
+                tensor, names = _align_tensor_channels(tensor, names, channels)
             if tensor.shape[1] != sequence_steps:
                 failed_rows += 1
+                continue
+            if expected_tensor_shape is None:
+                expected_tensor_shape = tuple(tensor.shape)
+            elif tuple(tensor.shape) != expected_tensor_shape:
+                shape_mismatch_count += 1
+                failed_rows += 1
+                if len(failure_samples) < 10:
+                    failure_samples.append(
+                        f"{valid_bj}: tensor_shape={tuple(tensor.shape)} expected={expected_tensor_shape}"
+                    )
                 continue
             tensors.append(tensor.astype(np.float32))
             stats = _tensor_stats(tensor, names)
             samples.append(
                 {
-                    "time_bj": str(valid_bj),
-                    "time_utc": str(pd.Timestamp(row.time_utc)),
-                    "power_mw": float(row.power_mw),
-                    "issue_time_utc": issue_utc.isoformat(),
-                    "horizon_code": horizon_code,
-                    "lead_hours": lead_hours(issue_utc, valid_utc),
-                    "nwp_file": str(nwp_file),
+                    "time_bj": record["time_bj"],
+                    "time_utc": record["time_utc"],
+                    "power_mw": float(record["power_mw"]),
+                    "issue_time_utc": record["issue_time_utc"],
+                    "horizon_code": record["horizon_code"],
+                    "lead_hours": float(record["lead_hours"]),
+                    "nwp_file": record["nwp_file"],
                     **stats,
                 }
             )
-        except Exception:
+        except Exception as exc:
             failed_rows += 1
+            if len(failure_samples) < 10:
+                failure_samples.append(f"{valid_bj}: {type(exc).__name__}: {exc}")
             continue
 
     if not samples:
         raise ValueError(
-            f"NWP alignment produced no samples. missing_files={sorted(missing_files)[:5]}, failed_rows={failed_rows}"
+            "NWP alignment produced no samples. "
+            f"missing_files={sorted(missing_files)[:5]}, failed_rows={failed_rows}, "
+            f"channel_mismatch_count={channel_mismatch_count}, shape_mismatch_count={shape_mismatch_count}, "
+            f"failure_samples={failure_samples[:5]}"
         )
 
     frame = pd.DataFrame(samples)
@@ -234,7 +392,12 @@ def build_nwp_power_datasets(
     train_idx = np.where(train_mask_aligned.to_numpy())[0]
     eval_idx = np.where(eval_mask_aligned.to_numpy())[0]
     if len(train_idx) == 0 or len(eval_idx) == 0:
-        raise ValueError(f"NWP aligned split is empty: train={len(train_idx)}, eval={len(eval_idx)}")
+        raise ValueError(
+            f"NWP aligned split is empty: train={len(train_idx)}, eval={len(eval_idx)}, "
+            f"missing_issue_count={len(missing_files)}, failed_rows={failed_rows}, "
+            f"channel_mismatch_count={channel_mismatch_count}, shape_mismatch_count={shape_mismatch_count}, "
+            f"failure_samples={failure_samples[:5]}"
+        )
 
     paths = {
         "nwp_aligned_table": str(out_dir / "nwp_aligned_table.csv"),
@@ -277,6 +440,15 @@ def build_nwp_power_datasets(
         "missing_issue_count": int(len(missing_files)),
         "missing_issues_sample": sorted(missing_files)[:10],
         "failed_rows": int(failed_rows),
+        "channel_mismatch_count": int(channel_mismatch_count),
+        "shape_mismatch_count": int(shape_mismatch_count),
+        "failure_samples": failure_samples,
+        "nwp_group_count": int(len(group_items)),
+        "nwp_workers": int(workers),
+        "nwp_parallel_backend": backend,
+        "nwp_parallel_fallback_reason": parallel_fallback_reason,
+        "nwp_prefilter_order": "station_grid_then_valid_time_window_then_15min_downscale",
+        "horizon_code": horizon_code,
         "channels": channels or [],
         "feature_count": len(feature_names),
         "feature_contract": "x=nwp_only,y=power_mw",
@@ -414,6 +586,20 @@ def _preselect_station(ds, *, longitude: float, latitude: float, grid_size: int,
     return extract_nxn_grid(ds, longitude, latitude, grid_size)
 
 
+def _preselect_valid_time_window(ds, valid_utcs: list[datetime], *, sequence_steps: int):
+    if "valid_time" not in ds.dims or not valid_utcs:
+        return ds
+    half = int(sequence_steps) // 2
+    pad = pd.Timedelta(minutes=15 * half + 60)
+    times = []
+    for value in valid_utcs:
+        ts = pd.Timestamp(require_aware_utc(value))
+        times.append(ts.tz_convert("UTC").tz_localize(None))
+    start = min(times) - pad
+    end = max(times) + pad
+    return ds.sel(valid_time=slice(np.datetime64(start), np.datetime64(end)))
+
+
 def extract_nxn_grid(ds, longitude: float, latitude: float, n: int):
     point = ds.sel(longitude=longitude, latitude=latitude, method="nearest")
     lon_nearest = point.longitude.values
@@ -519,15 +705,24 @@ def _extract_wind_tensor(ds) -> tuple[np.ndarray, list[str]]:
 def _extract_solar_tensor(ds) -> tuple[np.ndarray, list[str]]:
     arrays = []
     names = []
+    expected_shape: tuple[int, ...] | None = None
+    skipped_shapes: list[str] = []
     for name in SOLAR_BASE_VARS:
         if name not in ds:
             continue
         da = ds[name]
         if set(["valid_time", "latitude", "longitude"]).issubset(da.dims):
-            arrays.append(da.transpose("valid_time", "latitude", "longitude").values)
+            arr = da.transpose("valid_time", "latitude", "longitude").values
+            if expected_shape is None:
+                expected_shape = tuple(arr.shape)
+            elif tuple(arr.shape) != expected_shape:
+                skipped_shapes.append(f"{name}:{tuple(arr.shape)}")
+                continue
+            arrays.append(arr)
             names.append(name)
     if not arrays:
-        raise ValueError("missing solar variables")
+        detail = f"; skipped_shape_mismatch={skipped_shapes}" if skipped_shapes else ""
+        raise ValueError(f"missing solar variables{detail}")
     return np.stack(arrays, axis=0), names
 
 
