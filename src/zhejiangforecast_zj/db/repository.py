@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from zhejiangforecast_zj.core.jsonx import dumps, loads
 from zhejiangforecast_zj.db.models import (
+    AssetLineage,
+    DataAsset,
     OnlineModelArtifact,
     OnlineModelCurve,
     OnlineModelDataCheck,
@@ -17,6 +20,9 @@ from zhejiangforecast_zj.db.models import (
     OnlineModelJob,
     OnlineModelLog,
     OnlineModelTask,
+    PipelineRun,
+    PublishedModel,
+    StationRegistry,
 )
 from zhejiangforecast_zj.db.session import init_db, make_session_factory
 
@@ -52,9 +58,21 @@ class Repository:
         if obj is None:
             return None
         out = {column.name: getattr(obj, column.name) for column in obj.__table__.columns}
-        for key in ["model_candidates", "request_json", "summary_json", "metrics_json"]:
+        defaults = {
+            "model_candidates": [],
+            "request_json": {},
+            "summary_json": {},
+            "metrics_json": {},
+            "metadata_json": {},
+            "schema_json": {},
+            "input_assets_json": [],
+            "output_assets_json": [],
+            "params_json": {},
+            "result_json": {},
+        }
+        for key, default in defaults.items():
             if key in out:
-                out[key] = loads(out[key], default=[] if key == "model_candidates" else {})
+                out[key] = loads(out[key], default=default)
         return out
 
     @classmethod
@@ -281,6 +299,280 @@ class Repository:
         )
         if limit:
             stmt = stmt.limit(int(limit))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
+    def upsert_station(self, record: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow_iso()
+        station_id = str(record["station_id"])
+        payload = {
+            **record,
+            "station_id": station_id,
+            "metadata_json": dumps(record.get("metadata", record.get("metadata_json", {}))),
+            "updated_time": now,
+        }
+        payload.pop("metadata", None)
+        payload.setdefault("status", "ACTIVE")
+        payload = self._filter_payload(StationRegistry, payload)
+        with self.session_scope() as session:
+            obj = session.get(StationRegistry, station_id)
+            if obj is None:
+                payload["created_time"] = now
+                session.add(StationRegistry(**payload))
+            else:
+                for key, value in payload.items():
+                    setattr(obj, key, value)
+        return self.get_station(station_id)
+
+    def get_station(self, station_id: str) -> dict[str, Any]:
+        with self.session_scope() as session:
+            obj = session.get(StationRegistry, station_id)
+            row = self._row(obj)
+        if not row:
+            raise KeyError(f"Station not found: {station_id}")
+        return row
+
+    def list_stations(
+        self,
+        station_type: str | None = None,
+        region_id: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        stmt = select(StationRegistry).order_by(StationRegistry.updated_time.desc())
+        if station_type:
+            stmt = stmt.where(StationRegistry.station_type == station_type)
+        if region_id:
+            stmt = stmt.where(StationRegistry.region_id == region_id)
+        if status:
+            stmt = stmt.where(StationRegistry.status == status)
+        stmt = stmt.limit(max(1, int(limit)))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
+    def create_data_asset(self, record: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow_iso()
+        asset_id = str(record.get("asset_id") or f"asset_{uuid.uuid4().hex[:12]}")
+        payload = {
+            **record,
+            "asset_id": asset_id,
+            "schema_json": dumps(record.get("schema", record.get("schema_json", {}))),
+            "summary_json": dumps(record.get("summary", record.get("summary_json", {}))),
+            "status": record.get("status", "REGISTERED"),
+            "created_time": now,
+            "updated_time": now,
+        }
+        payload.pop("schema", None)
+        payload.pop("summary", None)
+        payload = self._filter_payload(DataAsset, payload)
+        with self.session_scope() as session:
+            session.add(DataAsset(**payload))
+        return self.get_data_asset(asset_id)
+
+    def update_data_asset(self, asset_id: str, **fields: Any) -> dict[str, Any]:
+        if not fields:
+            return self.get_data_asset(asset_id)
+        fields["updated_time"] = utcnow_iso()
+        if "schema" in fields:
+            fields["schema_json"] = dumps(fields.pop("schema"))
+        if "summary" in fields:
+            fields["summary_json"] = dumps(fields.pop("summary"))
+        if "schema_json" in fields and not isinstance(fields["schema_json"], str):
+            fields["schema_json"] = dumps(fields["schema_json"])
+        if "summary_json" in fields and not isinstance(fields["summary_json"], str):
+            fields["summary_json"] = dumps(fields["summary_json"])
+        fields = self._filter_payload(DataAsset, fields)
+        with self.session_scope() as session:
+            obj = session.get(DataAsset, asset_id)
+            if obj is None:
+                raise KeyError(f"Data asset not found: {asset_id}")
+            for key, value in fields.items():
+                setattr(obj, key, value)
+        return self.get_data_asset(asset_id)
+
+    def get_data_asset(self, asset_id: str) -> dict[str, Any]:
+        with self.session_scope() as session:
+            obj = session.get(DataAsset, asset_id)
+            row = self._row(obj)
+        if not row:
+            raise KeyError(f"Data asset not found: {asset_id}")
+        return row
+
+    def list_data_assets(
+        self,
+        station_id: str | None = None,
+        task_id: str | None = None,
+        asset_type: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        stmt = select(DataAsset).order_by(DataAsset.updated_time.desc())
+        if station_id:
+            stmt = stmt.where(DataAsset.station_id == station_id)
+        if task_id:
+            stmt = stmt.where(DataAsset.task_id == task_id)
+        if asset_type:
+            stmt = stmt.where(DataAsset.asset_type == asset_type)
+        stmt = stmt.limit(max(1, int(limit)))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
+    def create_pipeline_run(self, record: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow_iso()
+        run_id = str(record.get("run_id") or f"run_{uuid.uuid4().hex[:12]}")
+        payload = {
+            **record,
+            "run_id": run_id,
+            "status": record.get("status", "CREATED"),
+            "stage": record.get("stage") or record.get("run_type"),
+            "progress": record.get("progress", 0.0),
+            "input_assets_json": dumps(record.get("input_assets", record.get("input_assets_json", []))),
+            "output_assets_json": dumps(record.get("output_assets", record.get("output_assets_json", []))),
+            "params_json": dumps(record.get("params", record.get("params_json", {}))),
+            "result_json": dumps(record.get("result", record.get("result_json", {}))),
+            "created_time": now,
+            "updated_time": now,
+            "started_time": record.get("started_time") or now,
+        }
+        for key in ["input_assets", "output_assets", "params", "result"]:
+            payload.pop(key, None)
+        payload = self._filter_payload(PipelineRun, payload)
+        with self.session_scope() as session:
+            session.add(PipelineRun(**payload))
+        return self.get_pipeline_run(run_id)
+
+    def update_pipeline_run(self, run_id: str, **fields: Any) -> dict[str, Any]:
+        if not fields:
+            return self.get_pipeline_run(run_id)
+        fields["updated_time"] = utcnow_iso()
+        if fields.get("status") in {"SUCCESS", "FAILED", "CANCELED"} and not fields.get("finished_time"):
+            fields["finished_time"] = utcnow_iso()
+        for public_key, db_key in [
+            ("input_assets", "input_assets_json"),
+            ("output_assets", "output_assets_json"),
+            ("params", "params_json"),
+            ("result", "result_json"),
+        ]:
+            if public_key in fields:
+                fields[db_key] = dumps(fields.pop(public_key))
+        for key in ["input_assets_json", "output_assets_json", "params_json", "result_json"]:
+            if key in fields and not isinstance(fields[key], str):
+                fields[key] = dumps(fields[key])
+        fields = self._filter_payload(PipelineRun, fields)
+        with self.session_scope() as session:
+            obj = session.get(PipelineRun, run_id)
+            if obj is None:
+                raise KeyError(f"Pipeline run not found: {run_id}")
+            for key, value in fields.items():
+                setattr(obj, key, value)
+        return self.get_pipeline_run(run_id)
+
+    def get_pipeline_run(self, run_id: str) -> dict[str, Any]:
+        with self.session_scope() as session:
+            obj = session.get(PipelineRun, run_id)
+            row = self._row(obj)
+        if not row:
+            raise KeyError(f"Pipeline run not found: {run_id}")
+        return row
+
+    def list_pipeline_runs(
+        self,
+        task_id: str | None = None,
+        station_id: str | None = None,
+        run_type: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        stmt = select(PipelineRun).order_by(PipelineRun.created_time.desc())
+        if task_id:
+            stmt = stmt.where(PipelineRun.task_id == task_id)
+        if station_id:
+            stmt = stmt.where(PipelineRun.station_id == station_id)
+        if run_type:
+            stmt = stmt.where(PipelineRun.run_type == run_type)
+        stmt = stmt.limit(max(1, int(limit)))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
+    def add_asset_lineage(
+        self,
+        run_id: str,
+        input_asset_id: str | None,
+        output_asset_id: str | None,
+        relation_type: str = "DERIVED_FROM",
+    ) -> None:
+        with self.session_scope() as session:
+            session.add(
+                AssetLineage(
+                    run_id=run_id,
+                    input_asset_id=input_asset_id,
+                    output_asset_id=output_asset_id,
+                    relation_type=relation_type,
+                    created_time=utcnow_iso(),
+                )
+            )
+
+    def list_asset_lineage(self, run_id: str | None = None, asset_id: str | None = None) -> list[dict[str, Any]]:
+        stmt = select(AssetLineage).order_by(AssetLineage.id)
+        if run_id:
+            stmt = stmt.where(AssetLineage.run_id == run_id)
+        if asset_id:
+            stmt = stmt.where((AssetLineage.input_asset_id == asset_id) | (AssetLineage.output_asset_id == asset_id))
+        with self.session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+            return [self._row(row) for row in rows]  # type: ignore[list-item]
+
+    def create_published_model(self, record: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow_iso()
+        published_model_id = str(record.get("published_model_id") or record.get("model_id") or f"pm_{uuid.uuid4().hex[:12]}")
+        payload = {
+            **record,
+            "published_model_id": published_model_id,
+            "metrics_json": dumps(record.get("metrics", record.get("metrics_json", {}))),
+            "status": record.get("status", "ACTIVE"),
+            "created_time": now,
+            "updated_time": now,
+        }
+        payload.pop("metrics", None)
+        payload = self._filter_payload(PublishedModel, payload)
+        with self.session_scope() as session:
+            existing = session.get(PublishedModel, published_model_id)
+            if existing is None:
+                session.add(PublishedModel(**payload))
+            else:
+                payload.pop("created_time", None)
+                for key, value in payload.items():
+                    setattr(existing, key, value)
+        return self.get_published_model(published_model_id)
+
+    def get_published_model(self, published_model_id: str) -> dict[str, Any]:
+        with self.session_scope() as session:
+            obj = session.get(PublishedModel, published_model_id)
+            row = self._row(obj)
+        if not row:
+            raise KeyError(f"Published model not found: {published_model_id}")
+        return row
+
+    def list_published_models(
+        self,
+        station_id: str | None = None,
+        task_id: str | None = None,
+        station_type: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        stmt = select(PublishedModel).order_by(PublishedModel.updated_time.desc())
+        if station_id:
+            stmt = stmt.where(PublishedModel.station_id == station_id)
+        if task_id:
+            stmt = stmt.where(PublishedModel.task_id == task_id)
+        if station_type:
+            stmt = stmt.where(PublishedModel.station_type == station_type)
+        if status:
+            stmt = stmt.where(PublishedModel.status == status)
+        stmt = stmt.limit(max(1, int(limit)))
         with self.session_scope() as session:
             rows = session.execute(stmt).scalars().all()
             return [self._row(row) for row in rows]  # type: ignore[list-item]

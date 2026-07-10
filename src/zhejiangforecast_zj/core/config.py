@@ -124,6 +124,10 @@ class Settings:
     nwp_roots: dict[str, Path] | None = None
     nwp_job_workers: int = 4
     nwp_parallel_backend: str = "loky"
+    region_grid_margin_deg: float = 0.5
+    region_grid_resolution_deg: float = 0.25
+    region_grid_multiple: int = 8
+    region_grid_min_size: int = 16
     default_timezone: str = "Asia/Shanghai"
     local_job_workers: int = 2
 
@@ -208,6 +212,12 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
         "ZJ_FORECAST_NWP_PARALLEL_BACKEND",
         str(_get_nested(config, "nwp", "parallel_backend") or "loky"),
     )
+    region_grid_margin_deg = float(os.getenv("ZJ_FORECAST_REGION_GRID_MARGIN_DEG", str(_get_nested(config, "region_grid", "margin_deg") or 0.5)))
+    region_grid_resolution_deg = float(
+        os.getenv("ZJ_FORECAST_REGION_GRID_RESOLUTION_DEG", str(_get_nested(config, "region_grid", "resolution_deg") or 0.25))
+    )
+    region_grid_multiple = int(os.getenv("ZJ_FORECAST_REGION_GRID_MULTIPLE", str(_get_nested(config, "region_grid", "swin_grid_multiple") or 8)))
+    region_grid_min_size = int(os.getenv("ZJ_FORECAST_REGION_GRID_MIN_SIZE", str(_get_nested(config, "region_grid", "min_grid_size") or 16)))
     settings = Settings(
         project_root=root,
         db_path=db_path,
@@ -217,6 +227,10 @@ def get_settings(project_root: str | Path | None = None) -> Settings:
         nwp_roots=nwp_roots,
         nwp_job_workers=max(1, nwp_workers),
         nwp_parallel_backend=nwp_parallel_backend,
+        region_grid_margin_deg=max(0.0, region_grid_margin_deg),
+        region_grid_resolution_deg=max(1e-6, region_grid_resolution_deg),
+        region_grid_multiple=max(1, region_grid_multiple),
+        region_grid_min_size=max(1, region_grid_min_size),
         local_job_workers=workers,
     )
     settings.ensure_dirs()

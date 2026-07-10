@@ -11,6 +11,7 @@ from zhejiangforecast_zj.algorithm_engine.adapters.cleaning import clean_solar_p
 from zhejiangforecast_zj.algorithm_engine.adapters.nwp import build_nwp_power_datasets, index_nwp_files
 from zhejiangforecast_zj.core.model_catalog import normalize_candidates
 from zhejiangforecast_zj.core.paths import task_dir
+from zhejiangforecast_zj.core.regions import apply_region_grid_to_payload
 from zhejiangforecast_zj.db.repository import Repository
 from zhejiangforecast_zj.services.etl import (
     build_tabular_dataset,
@@ -29,6 +30,13 @@ def create_or_ingest_task(
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     repo = repo or Repository(settings.database_url)
+    payload = apply_region_grid_to_payload(
+        payload,
+        resolution_deg=settings.region_grid_resolution_deg,
+        margin_deg=settings.region_grid_margin_deg,
+        grid_multiple=settings.region_grid_multiple,
+        min_grid_size=settings.region_grid_min_size,
+    )
     station_type = str(payload.get("station_type") or StationType.WIND.value).lower()
     object_type = str(payload.get("object_type") or ObjectType.STATION.value).lower()
     task_id = str(payload.get("task_id") or f"task_{uuid.uuid4().hex[:12]}")
@@ -225,6 +233,7 @@ def run_data_pipeline(task_id: str, settings: Settings | None = None, repo: Repo
             "station": station.__dict__,
             "nwp": nwp_summary,
             "capacity_mw": capacity_mw,
+            "region_grid": (request.get("etl_options") or {}).get("region_grid"),
             "check_result": "PASS",
         }
         config = read_json(task["config_path"], default={})

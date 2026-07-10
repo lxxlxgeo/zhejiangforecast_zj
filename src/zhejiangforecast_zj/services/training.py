@@ -109,6 +109,7 @@ def _train_candidate(
     model_dir = work_dir / "models" / model_id
     model_dir.mkdir(parents=True, exist_ok=True)
     prediction_path = work_dir / "reports" / f"predictions_{model_id}.csv"
+    prediction_path.parent.mkdir(parents=True, exist_ok=True)
 
     if "LORA" in candidate.upper():
         deep = _train_lora_candidate(candidate, model_dir, task_artifacts, eval_times, capacity_mw, prediction_path, train_options)

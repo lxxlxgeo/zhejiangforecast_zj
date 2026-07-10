@@ -8,17 +8,35 @@ from fastapi import FastAPI, HTTPException, Query
 from zhejiangforecast_zj.core.config import get_settings
 from zhejiangforecast_zj.core.jsonx import read_json, write_json
 from zhejiangforecast_zj.core.model_catalog import list_models
+from zhejiangforecast_zj.core.regions import build_region_grid_spec, list_region_bounds, resolve_region_bounds
 from zhejiangforecast_zj.db.repository import Repository, utcnow_iso
 from zhejiangforecast_zj.schemas import (
+    CleaningRunRequest,
+    DataAssetRequest,
     DataEditRequest,
+    EtlRunRequest,
     EvaluateRequest,
     InferRequest,
     IngestRequest,
+    MlopsEvaluationRunRequest,
+    MlopsPublishRequest,
+    MlopsTrainingRunRequest,
     PublishRequest,
+    StationRegistryRequest,
     TrainRequest,
 )
 from zhejiangforecast_zj.services.evaluation import get_evaluation_result, run_evaluation
 from zhejiangforecast_zj.services.inference import run_inference
+from zhejiangforecast_zj.services.mlops import (
+    preview_run_artifact,
+    register_data_asset,
+    register_station,
+    run_cleaning_stage,
+    run_etl_stage,
+    run_evaluation_stage,
+    run_publish_stage,
+    run_training_stage,
+)
 from zhejiangforecast_zj.services.orchestrator import LocalOrchestrator
 from zhejiangforecast_zj.services.publishing import publish_model
 from zhejiangforecast_zj.services.tasks import create_or_ingest_task, run_data_pipeline
@@ -44,6 +62,12 @@ def health() -> dict:
             "nwp_roots": {key: str(value) for key, value in (settings.nwp_roots or {}).items()},
             "nwp_workers": settings.nwp_job_workers,
             "nwp_parallel_backend": settings.nwp_parallel_backend,
+            "region_grid": {
+                "margin_deg": settings.region_grid_margin_deg,
+                "resolution_deg": settings.region_grid_resolution_deg,
+                "swin_grid_multiple": settings.region_grid_multiple,
+                "min_grid_size": settings.region_grid_min_size,
+            },
         }
     )
 
@@ -185,6 +209,33 @@ def model_list(station_type: str | None = None, object_type: str | None = None) 
     return _success_response({"models": list_models(station_type=station_type, object_type=object_type)})
 
 
+@app.get("/api/v1/online-modeling/region/list")
+def region_list() -> dict:
+    return _success_response({"regions": list_region_bounds()})
+
+
+@app.get("/api/v1/online-modeling/region/grid")
+def region_grid(
+    region_id: str = Query(...),
+    grid_size: int | None = Query(None, ge=1),
+    resolution_deg: float | None = Query(None, gt=0),
+    margin_deg: float | None = Query(None, ge=0),
+    swin_grid_multiple: int | None = Query(None, ge=1),
+) -> dict:
+    bounds = resolve_region_bounds(region_id)
+    if bounds is None:
+        raise HTTPException(status_code=404, detail=f"Region not found: {region_id}")
+    spec = build_region_grid_spec(
+        bounds,
+        resolution_deg=resolution_deg or settings.region_grid_resolution_deg,
+        margin_deg=margin_deg if margin_deg is not None else settings.region_grid_margin_deg,
+        grid_multiple=swin_grid_multiple or settings.region_grid_multiple,
+        min_grid_size=settings.region_grid_min_size,
+        requested_grid_size=grid_size,
+    )
+    return _success_response({"region": bounds.__dict__, "grid": spec.__dict__})
+
+
 @app.post("/api/v1/online-modeling/evaluate")
 def evaluate(request: EvaluateRequest) -> dict:
     try:
@@ -231,6 +282,314 @@ def infer(request: InferRequest) -> dict:
 @app.get("/api/v1/online-modeling/infer/status")
 def infer_status(infer_id: str = Query(...)) -> dict:
     return _success_response({"infer_id": infer_id, "status": "SUCCESS", "note": "Local inference is synchronous in phase 1."})
+
+
+@app.post("/api/v1/mlops/stations")
+def mlops_register_station(request: StationRegistryRequest) -> dict:
+    try:
+        return _success_response(register_station(request.dict(exclude_none=True), repo=repo))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/stations")
+def mlops_list_stations(
+    station_type: str | None = None,
+    region_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {
+            "stations": repo.list_stations(
+                station_type=station_type,
+                region_id=region_id,
+                status=status,
+                limit=limit,
+            )
+        }
+    )
+
+
+@app.get("/api/v1/mlops/stations/{station_id}")
+def mlops_get_station(station_id: str) -> dict:
+    try:
+        return _success_response(repo.get_station(station_id))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/data/assets")
+def mlops_register_data_asset(request: DataAssetRequest) -> dict:
+    try:
+        return _success_response(register_data_asset(request.dict(exclude_none=True, by_alias=True), repo=repo))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/data/assets")
+def mlops_list_data_assets(
+    station_id: str | None = None,
+    task_id: str | None = None,
+    asset_type: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {
+            "assets": repo.list_data_assets(
+                station_id=station_id,
+                task_id=task_id,
+                asset_type=asset_type,
+                limit=limit,
+            )
+        }
+    )
+
+
+@app.get("/api/v1/mlops/data/assets/{asset_id}")
+def mlops_get_data_asset(asset_id: str) -> dict:
+    try:
+        return _success_response(repo.get_data_asset(asset_id))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/cleaning/runs")
+def mlops_run_cleaning(request: CleaningRunRequest) -> dict:
+    try:
+        return _success_response(run_cleaning_stage(request.dict(exclude_none=True), settings=settings, repo=repo))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/cleaning/runs")
+def mlops_list_cleaning_runs(
+    task_id: str | None = None,
+    station_id: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {
+            "runs": repo.list_pipeline_runs(
+                task_id=task_id,
+                station_id=station_id,
+                run_type="cleaning",
+                limit=limit,
+            )
+        }
+    )
+
+
+@app.get("/api/v1/mlops/cleaning/runs/{run_id}")
+def mlops_get_cleaning_run(run_id: str) -> dict:
+    try:
+        return _success_response(_pipeline_run_payload(run_id))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/cleaning/runs/{run_id}/summary")
+def mlops_get_cleaning_summary(run_id: str) -> dict:
+    try:
+        run = repo.get_pipeline_run(run_id)
+        result = run.get("result_json") or {}
+        return _success_response(
+            {
+                "run_id": run_id,
+                "task_id": run.get("task_id") or result.get("task_id"),
+                "status": run["status"],
+                "summary": result.get("summary") or {},
+                "artifacts": result.get("artifacts") or {},
+                "output_assets": result.get("output_assets") or run.get("output_assets_json") or [],
+            }
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/cleaning/runs/{run_id}/preview")
+def mlops_preview_cleaning_run(run_id: str, limit: int = Query(200, ge=1, le=2000)) -> dict:
+    try:
+        return _success_response(preview_run_artifact(repo.get_pipeline_run(run_id), data_type="clean", limit=limit))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/etl/runs")
+def mlops_run_etl(request: EtlRunRequest) -> dict:
+    try:
+        return _success_response(run_etl_stage(request.dict(exclude_none=True), settings=settings, repo=repo))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/etl/runs")
+def mlops_list_etl_runs(
+    task_id: str | None = None,
+    station_id: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {"runs": repo.list_pipeline_runs(task_id=task_id, station_id=station_id, run_type="etl", limit=limit)}
+    )
+
+
+@app.get("/api/v1/mlops/etl/runs/{run_id}")
+def mlops_get_etl_run(run_id: str) -> dict:
+    try:
+        return _success_response(_pipeline_run_payload(run_id))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/etl/runs/{run_id}/preview")
+def mlops_preview_etl_run(
+    run_id: str,
+    data_type: str = Query("eval"),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    try:
+        return _success_response(preview_run_artifact(repo.get_pipeline_run(run_id), data_type=data_type, limit=limit))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/training/runs")
+def mlops_run_training(request: MlopsTrainingRunRequest) -> dict:
+    try:
+        return _success_response(
+            run_training_stage(request.dict(exclude_none=True), settings=settings, repo=repo, orchestrator=orchestrator)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/training/runs")
+def mlops_list_training_runs(
+    task_id: str | None = None,
+    station_id: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {"runs": repo.list_pipeline_runs(task_id=task_id, station_id=station_id, run_type="train", limit=limit)}
+    )
+
+
+@app.get("/api/v1/mlops/training/runs/{run_id}")
+def mlops_get_training_run(run_id: str) -> dict:
+    try:
+        return _success_response(_pipeline_run_payload(run_id, include_job=True))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/evaluation/runs")
+def mlops_run_evaluation(request: MlopsEvaluationRunRequest) -> dict:
+    try:
+        return _success_response(
+            run_evaluation_stage(request.dict(exclude_none=True), settings=settings, repo=repo, orchestrator=orchestrator)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/evaluation/runs")
+def mlops_list_evaluation_runs(
+    task_id: str | None = None,
+    station_id: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {"runs": repo.list_pipeline_runs(task_id=task_id, station_id=station_id, run_type="evaluate", limit=limit)}
+    )
+
+
+@app.get("/api/v1/mlops/evaluation/runs/{run_id}")
+def mlops_get_evaluation_run(run_id: str) -> dict:
+    try:
+        return _success_response(_pipeline_run_payload(run_id, include_job=True))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/mlops/models/publish")
+def mlops_publish_model(request: MlopsPublishRequest) -> dict:
+    try:
+        return _success_response(run_publish_stage(request.dict(exclude_none=True), settings=settings, repo=repo))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/models/published")
+def mlops_list_published_models(
+    station_id: str | None = None,
+    task_id: str | None = None,
+    station_type: str | None = None,
+    status: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {
+            "models": repo.list_published_models(
+                station_id=station_id,
+                task_id=task_id,
+                station_type=station_type,
+                status=status,
+                limit=limit,
+            )
+        }
+    )
+
+
+@app.get("/api/v1/mlops/models/published/{published_model_id}")
+def mlops_get_published_model(published_model_id: str) -> dict:
+    try:
+        return _success_response(repo.get_published_model(published_model_id))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/mlops/pipeline/runs")
+def mlops_list_pipeline_runs(
+    task_id: str | None = None,
+    station_id: str | None = None,
+    run_type: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
+    return _success_response(
+        {"runs": repo.list_pipeline_runs(task_id=task_id, station_id=station_id, run_type=run_type, limit=limit)}
+    )
+
+
+@app.get("/api/v1/mlops/pipeline/runs/{run_id}")
+def mlops_get_pipeline_run(run_id: str) -> dict:
+    try:
+        return _success_response(_pipeline_run_payload(run_id, include_job=True))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _pipeline_run_payload(run_id: str, include_job: bool = False) -> dict:
+    run = repo.get_pipeline_run(run_id)
+    payload = dict(run)
+    result = payload.get("result_json") or {}
+    task_id = payload.get("task_id") or result.get("task_id")
+    payload["lineage"] = repo.list_asset_lineage(run_id=run_id)
+    if task_id:
+        try:
+            payload["task"] = _public_payload(repo.get_task(task_id))
+        except Exception:
+            payload["task"] = None
+    if include_job:
+        job_id = result.get("job_id")
+        if job_id:
+            try:
+                payload["job"] = repo.get_job(job_id)
+            except Exception:
+                payload["job"] = None
+        elif task_id and payload.get("run_type") in {"train", "evaluate"}:
+            payload["job"] = repo.get_latest_job_for_task(task_id, payload.get("run_type"))
+    return payload
 
 
 def _train_submit_payload(job: dict, train_mode: str) -> dict:

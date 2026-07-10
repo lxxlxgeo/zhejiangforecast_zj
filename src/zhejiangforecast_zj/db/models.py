@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Float, Index, Integer, String, Text
+from sqlalchemy import Boolean, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -117,3 +117,99 @@ class OnlineModelJob(Base):
 
 
 Index("idx_job_task", OnlineModelJob.task_id)
+
+
+class StationRegistry(Base):
+    __tablename__ = "station_registry"
+
+    station_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    object_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    station_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    region_id: Mapped[str | None] = mapped_column(String(128))
+    station_name: Mapped[str | None] = mapped_column(String(256))
+    longitude: Mapped[float | None] = mapped_column(Float)
+    latitude: Mapped[float | None] = mapped_column(Float)
+    capacity_mw: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_time: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_time: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+Index("idx_station_type_region", StationRegistry.station_type, StationRegistry.region_id)
+
+
+class DataAsset(Base):
+    __tablename__ = "data_asset"
+
+    asset_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    station_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    asset_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    uri: Mapped[str | None] = mapped_column(Text)
+    format: Mapped[str | None] = mapped_column(String(64))
+    time_start: Mapped[str | None] = mapped_column(String(64))
+    time_end: Mapped[str | None] = mapped_column(String(64))
+    record_count: Mapped[int | None] = mapped_column(Integer)
+    schema_json: Mapped[str | None] = mapped_column(Text)
+    summary_json: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_time: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_time: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+Index("idx_data_asset_station_type", DataAsset.station_id, DataAsset.asset_type)
+
+
+class PipelineRun(Base):
+    __tablename__ = "pipeline_run"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    station_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    run_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(64))
+    sync: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    progress: Mapped[float | None] = mapped_column(Float, default=0)
+    input_assets_json: Mapped[str | None] = mapped_column(Text)
+    output_assets_json: Mapped[str | None] = mapped_column(Text)
+    params_json: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_time: Mapped[str | None] = mapped_column(String(64))
+    finished_time: Mapped[str | None] = mapped_column(String(64))
+    created_time: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_time: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+Index("idx_pipeline_run_task_type", PipelineRun.task_id, PipelineRun.run_type)
+
+
+class AssetLineage(Base):
+    __tablename__ = "asset_lineage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    input_asset_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    output_asset_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    relation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_time: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class PublishedModel(Base):
+    __tablename__ = "published_model"
+
+    published_model_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    station_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    station_type: Mapped[str | None] = mapped_column(String(32))
+    model_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    model_type: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[str | None] = mapped_column(String(64))
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    model_card_path: Mapped[str | None] = mapped_column(Text)
+    metrics_json: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_time: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_time: Mapped[str] = mapped_column(String(64), nullable=False)

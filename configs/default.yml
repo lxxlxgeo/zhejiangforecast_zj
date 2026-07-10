@@ -20,3 +20,13 @@ nwp:
   roots:
     wind: /mnt/d/data/netcdf/ecmwf/jiangsu
     solar: /mnt/d/data/netcdf/ecmwf/neimeng
+
+region_grid:
+  # Region tasks use the Zhejiang city/province bounds in core/regions.py.
+  # The bbox is expanded by margin_deg on each side, converted to a square
+  # center cutout, and rounded up so H == W and grid_size is divisible by
+  # swin_grid_multiple for Swin/Swin3D patch/merge stages.
+  margin_deg: 0.5
+  resolution_deg: 0.25
+  swin_grid_multiple: 8
+  min_grid_size: 16
